@@ -275,6 +275,7 @@ impl SkillRegistry {
                         // Determine the base indentation from the key line
                         let base_indent = raw.len() - raw.trim_start().len();
                         let mut block_lines: Vec<&str> = Vec::new();
+                        let mut content_indent: Option<usize> = None;
                         i += 1;
                         while i < lines.len() {
                             let raw_line = lines[i];
@@ -286,12 +287,34 @@ impl SkillRegistry {
                             }
                             let line_indent = raw_line.len() - raw_line.trim_start().len();
                             if line_indent > base_indent {
-                                block_lines.push(raw_line.trim());
+                                // Track content indent from the first non-empty
+                                // line so we strip only that one level of
+                                // leading whitespace, preserving any deeper
+                                // relative indentation (YAML §8.1.2).
+                                if content_indent.is_none() {
+                                    content_indent = Some(line_indent);
+                                }
+                                block_lines.push(raw_line);
                                 i += 1;
                             } else {
                                 break;
                             }
                         }
+                        let content_indent = content_indent.unwrap_or(base_indent);
+                        // Strip only the content indent from each non-empty
+                        // line so nested indentation survives.
+                        let block_lines: Vec<&str> = block_lines
+                            .iter()
+                            .map(|raw| {
+                                if raw.is_empty() {
+                                    ""
+                                } else {
+                                    let indent = raw.len() - raw.trim_start().len();
+                                    let strip = std::cmp::min(indent, content_indent);
+                                    &raw[strip..]
+                                }
+                            })
+                            .collect();
                         // Apply chomping to trailing empty lines before folding.
                         // Chomping operates on the raw block_lines (before join), so
                         // strip / keep / clip behave per the YAML spec.
@@ -1598,4 +1621,34 @@ mod tests {
         assert_eq!(skill.description, "line one\nline two\n\n");
     }
 
+    /// Nested relative indentation is preserved in literal (`|`) block
+    /// scalars: only the content-level indent (from the first non-empty
+    /// line) is stripped, and any deeper indent stays as-is.
+    #[test]
+    fn parse_skill_literal_preserves_relative_indentation() {
+        let skill = super::SkillRegistry::parse_skill(
+            std::path::Path::new(""),
+            "---\nname: s\ndescription: |\n  Usage:\n    $ deepseek --model auto\n    $ deepseek doctor\n---\nbody",
+        )
+        .expect("should parse");
+        assert_eq!(
+            skill.description,
+            "Usage:\n  $ deepseek --model auto\n  $ deepseek doctor"
+        );
+    }
+
+    /// Folded (`>`) block scalars also preserve relative indentation
+    /// within lines (the extra spaces survive the fold).
+    #[test]
+    fn parse_skill_folded_preserves_relative_indentation() {
+        let skill = super::SkillRegistry::parse_skill(
+            std::path::Path::new(""),
+            "---\nname: s\ndescription: >\n  See also:\n    the config file\n    the env var\n---\nbody",
+        )
+        .expect("should parse");
+        assert_eq!(
+            skill.description,
+            "See also:   the config file   the env var"
+        );
+    }
 }
